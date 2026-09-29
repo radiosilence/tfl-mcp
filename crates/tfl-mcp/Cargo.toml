@@ -1,6 +1,6 @@
 [package]
 name = "tfl-mcp"
-version = "1.3.4"
+version = "1.3.5"
 description = "MCP and GraphQL server for the Transport for London Unified API"
 edition.workspace = true
 license.workspace = true
