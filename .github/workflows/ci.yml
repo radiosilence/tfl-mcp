@@ -141,6 +141,19 @@ jobs:
           # a release target/ is the largest entry in the repository's 10GB.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build --release --locked -p tfl-mcp --target ${{ matrix.target }}
+      # Developer ID signed and notarised, so the tarball runs from a browser
+      # download without clearing quarantine. Pull requests stay ad-hoc signed.
+      - name: Sign and notarise (macOS)
+        if: runner.os == 'macOS' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'schedule'
+        uses: radiosilence/blit-workflows/macos-notarise@c8a650dfa5a0fbe012c61eab28f615c1983aee18
+        with:
+          binaries: |
+            target/${{ matrix.target }}/release/tfl
+          certificate-p12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          certificate-password: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          api-key-p8: ${{ secrets.APPLE_API_KEY_P8 }}
+          api-key-id: ${{ secrets.APPLE_API_KEY_ID }}
+          api-issuer-id: ${{ secrets.APPLE_API_ISSUER_ID }}
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
