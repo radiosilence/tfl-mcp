@@ -123,6 +123,7 @@ jobs:
       major: ${{ steps.check.outputs.major }}
       major_minor: ${{ steps.check.outputs.major_minor }}
       apple: ${{ steps.apple.outputs.apple }}
+      release_pr: ${{ steps.apple.outputs.release_pr }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -152,11 +153,19 @@ jobs:
           echo "major=$(echo $CURRENT_VERSION | cut -d. -f1)" >> $GITHUB_OUTPUT
           echo "major_minor=$(echo $CURRENT_VERSION | cut -d. -f1-2)" >> $GITHUB_OUTPUT
       # Whether a pull request changes anything Linux cannot check for macOS,
-      # which decides whether it takes a macOS runner. HEAD^1 of a pull
-      # request's merge commit is the base branch, so this is its whole diff.
+      # which decides whether it takes a macOS runner, and whether it is a
+      # release pull request (it bumps the version), which also packages the
+      # macOS binary. HEAD^1 of a pull request's merge commit is the base
+      # branch, so this is its whole diff.
       - id: apple
         if: github.event_name == 'pull_request'
         run: |
+          version_of() { sed -n 's/^version = "\(.*\)"/\1/p' | head -1; }
+          if [ "$(version_of < crates/tfl-mcp/Cargo.toml)" != "$(git show HEAD^1:crates/tfl-mcp/Cargo.toml | version_of)" ]; then
+            echo "release_pr=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_pr=false" >> "$GITHUB_OUTPUT"
+          fi
           if git diff --name-only HEAD^1 HEAD | grep -E '(^|/)(Cargo\.toml|Cargo\.lock|build\.rs)$|^\.cargo/|^rust-toolchain|^mise\.toml$|^\.github/workflows/'; then
             echo "apple=true" >> "$GITHUB_OUTPUT"
           else
@@ -167,19 +176,25 @@ jobs:
   # repository, and this crate has no platform-specific code, so Linux checks
   # the code on every pull request. A pull request takes a macOS runner only
   # when it changes what Linux cannot vouch for on macOS: the toolchain, the
-  # dependencies (aws-lc-sys is a C build) or CI itself. On main it runs only
-  # for a release, and then only builds, signs and packages the binary the
-  # pull request already checked; the release job takes the tarball from here.
-  # Apple silicon only; x86_64 macOS builds were dropped.
+  # dependencies (aws-lc-sys is a C build) or CI itself.
+  #
+  # CHECK: clippy and the tests, on pull requests. PACKAGE: the release build
+  # and tarball, on a release pull request (unsigned, to prove it packages)
+  # and on the release itself. PUBLISH: signing and the upload, on the release
+  # only. On main the job runs only for a release, and the release job takes
+  # the tarball from here. Apple silicon only; x86_64 macOS builds were dropped.
   macos:
     name: macOS aarch64
     needs: [check-version]
     if: >-
-      (github.event_name == 'pull_request' && needs.check-version.outputs.apple == 'true') ||
+      (github.event_name == 'pull_request' && (needs.check-version.outputs.apple == 'true' || needs.check-version.outputs.release_pr == 'true')) ||
       (github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.check-version.outputs.should_release == 'true')
     runs-on: macos-latest
     env:
       TARGET: aarch64-apple-darwin
+      CHECK: ${{ github.event_name == 'pull_request' }}
+      PACKAGE: ${{ github.event_name != 'pull_request' || needs.check-version.outputs.release_pr == 'true' }}
+      PUBLISH: ${{ github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
@@ -187,8 +202,10 @@ jobs:
           toolchain: stable
           targets: aarch64-apple-darwin
           components: clippy
-      # One target dir and one cache entry for clippy, the tests and the
-      # release build.
+      # The entry is saved only on main, where this job runs only for a
+      # release, so it holds the release profile and the cargo registry. Pull
+      # request clippy and tests restore the registry but compile the debug
+      # profile cold.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: aarch64-apple-darwin
@@ -196,17 +213,22 @@ jobs:
           # saving here only evicts the main entry every PR restores from — and
           # a release target/ is the largest entry in the repository's 10GB.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Each check runs even when an earlier one fails, so one run reports
+      # every failure.
       - name: Clippy
-        if: github.event_name == 'pull_request'
+        if: ${{ !cancelled() && env.CHECK == 'true' }}
         run: cargo clippy --workspace --all-targets --locked --target "$TARGET" -- -D warnings
       - name: Test
-        if: github.event_name == 'pull_request'
+        if: ${{ !cancelled() && env.CHECK == 'true' }}
         run: cargo test --workspace --locked --target "$TARGET"
-      - run: cargo build --release --locked -p tfl-mcp --target "$TARGET"
+      - name: Build release binary
+        if: ${{ !cancelled() && env.PACKAGE == 'true' }}
+        run: cargo build --release --locked -p tfl-mcp --target "$TARGET"
       # Developer ID signed and notarised, so the tarball runs from a browser
-      # download without clearing quarantine. Pull requests stay ad-hoc signed.
+      # download without clearing quarantine. The action fails when a signing
+      # secret is missing, so a release never ships unsigned.
       - name: Sign and notarise
-        if: github.event_name != 'pull_request'
+        if: env.PUBLISH == 'true'
         uses: radiosilence/blit-workflows/macos-notarise@c8a650dfa5a0fbe012c61eab28f615c1983aee18
         with:
           binaries: |
@@ -217,18 +239,19 @@ jobs:
           api-key-id: ${{ secrets.APPLE_API_KEY_ID }}
           api-issuer-id: ${{ secrets.APPLE_API_ISSUER_ID }}
       - name: Package
-        if: github.event_name != 'pull_request'
+        if: ${{ !cancelled() && env.PACKAGE == 'true' }}
         run: tar -czvf tfl-darwin-aarch64.tar.gz -C target/aarch64-apple-darwin/release tfl
       - name: Upload artifact
-        if: github.event_name != 'pull_request'
+        if: env.PUBLISH == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tfl-darwin-aarch64
           path: tfl-darwin-aarch64.tar.gz
 
   # Compiles the musl binary and ships it straight into the image on the same
-  # runner. Kept out of the macOS job so the image never waits on it; kept in one job so the binary never round-trips through the artifact
-  # store, which would cost a runner handoff and drop its exec bit.
+  # runner. Kept out of the macOS job so the image never waits on it; kept in
+  # one job so the binary never round-trips through the artifact store, which
+  # would cost a runner handoff and drop its exec bit.
   # Runs on PRs too — only the registry push is main-gated, via PUBLISH.
   build-image:
     name: Build ${{ matrix.arch }} Image
