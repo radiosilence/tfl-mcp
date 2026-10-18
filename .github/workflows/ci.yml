@@ -5,10 +5,16 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Releases whatever version is not yet released: how a failed release is
+  # retried.
+  workflow_dispatch:
 
+# A pull request's newer push cancels its older run. Runs on main are never
+# cancelled, since any of them may be publishing a release, and a manual run
+# is in a group of its own.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -58,6 +64,27 @@ jobs:
       # No rust-cache here on purpose: `cargo fmt --check` compiles nothing.
       - run: cargo fmt --all -- --check
 
+  # CHANGELOG.md is generated from changelog.d/ (scripts/changelog.py). A pull
+  # request adds fragments without regenerating it, so only its fragments and
+  # the released versions are checked; one that writes CHANGELOG.md, as a
+  # release does, must write exactly what the fragments make.
+  changelog:
+    name: Changelog
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - run: python3 -m unittest scripts/test_changelog.py
+      - env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "pull_request" ] && git diff --name-only HEAD^1 HEAD | grep -qx CHANGELOG.md; then
+            python3 scripts/changelog.py --check
+          else
+            python3 scripts/changelog.py --lint
+          fi
+
   codegen:
     name: Generated client matches the spec
     runs-on: ubuntu-latest
@@ -97,17 +124,28 @@ jobs:
       major_minor: ${{ steps.check.outputs.major_minor }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 2
+      # A push releases only when it changes the version. Comparing with the
+      # latest GitHub release alone would let a push that lands while a release
+      # is still running release the same version a second time. A manual run
+      # releases whatever is unreleased. Pull requests never release, so this
+      # only matters on main.
       - id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT: ${{ github.event_name }}
         run: |
-          CURRENT_VERSION=$(grep '^version = ' crates/tfl-mcp/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          LATEST_RELEASE=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
-          LATEST_VERSION=${LATEST_RELEASE#v}
-          if [ -z "$LATEST_RELEASE" ] || [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
-            echo "should_release=true" >> $GITHUB_OUTPUT
+          version_of() { sed -n 's/^version = "\(.*\)"/\1/p' | head -1; }
+          CURRENT_VERSION=$(version_of < crates/tfl-mcp/Cargo.toml)
+          PREVIOUS=$(git show HEAD^:crates/tfl-mcp/Cargo.toml 2>/dev/null | version_of || true)
+          LATEST=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
+          if [ "$CURRENT_VERSION" = "${LATEST#v}" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = "workflow_dispatch" ] || [ "$CURRENT_VERSION" != "$PREVIOUS" ]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
           else
-            echo "should_release=false" >> $GITHUB_OUTPUT
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
           fi
           echo "version=${CURRENT_VERSION}" >> $GITHUB_OUTPUT
           echo "major=$(echo $CURRENT_VERSION | cut -d. -f1)" >> $GITHUB_OUTPUT
@@ -192,7 +230,7 @@ jobs:
       contents: read
       packages: write
     env:
-      PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -264,8 +302,8 @@ jobs:
 
   create-manifest:
     name: Push image manifest
-    needs: [test, lint, format, codegen, build-image, check-version]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [test, lint, format, changelog, codegen, build-image, check-version]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -300,22 +338,47 @@ jobs:
   # Also needs the manifest: this project is consumed as a container, so a
   # version tag with no image behind it is worse than no tag at all — and an
   # auto-updater polling releases will happily pin one.
+  #
+  # Creates the tag through the API, on the commit that was built. The notes
+  # are the version's section of CHANGELOG.md.
   create-release:
     name: Create Release
     needs:
-      [test, lint, format, codegen, build-binaries, build-image, check-version, create-manifest]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.check-version.outputs.should_release == 'true'
+      [test, lint, format, changelog, codegen, build-binaries, build-image, check-version, create-manifest]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      # Release writes go through RELEASE_TOKEN: GitHub refuses the workflow
+      # token's tag for a commit that changes a workflow.
+      - name: Check the release token
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          if [ -z "$RELEASE_TOKEN" ]; then
+            echo "::error::RELEASE_TOKEN is not set; the release cannot be published"
+            exit 1
+          fi
+      - name: Release notes
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          awk -v h="## $VERSION" '$0==h{f=1;next} f&&/^## /{exit} f' CHANGELOG.md > notes.md
+          if ! grep -q . notes.md; then
+            echo "::error::CHANGELOG.md has no section for $VERSION"
+            exit 1
+          fi
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
       - name: Create Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
+          token: ${{ secrets.RELEASE_TOKEN }}
           tag_name: v${{ needs.check-version.outputs.version }}
+          target_commitish: ${{ github.sha }}
           name: v${{ needs.check-version.outputs.version }}
+          body_path: notes.md
           files: artifacts/**/*.tar.gz
-          generate_release_notes: true
