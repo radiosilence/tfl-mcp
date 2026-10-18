@@ -1,14 +1,22 @@
 # Changelog
 
-## [Unreleased]
+## Unreleased
 
-## [1.3.5] (2026-09-29)
+### Internal
+
+- **Releases are cut through a release pull request.** `just release patch|minor|major` (or the Release workflow) bumps the version, turns the changelog fragments in `changelog.d/` into the release and opens the PR; merging it publishes the image and the GitHub release, whose notes are now the version's changelog section rather than generated from pull request titles. A push to main releases only when it changes the version, and a manual run of CI retries a release that failed part way. Pull requests add a fragment instead of editing CHANGELOG.md, so they no longer conflict on it.
+
+## 1.3.5
+
+Released 2026-09-29.
 
 ### Changed
 
 - **macOS release binaries are signed with a Developer ID and notarised.** Downloaded through a browser, the ad-hoc signed binaries were quarantined and Gatekeeper refused to run them until the quarantine attribute was cleared.
 
-## [1.3.4] (2026-07-26)
+## 1.3.4
+
+Released 2026-07-26.
 
 ### Fixed
 
@@ -24,13 +32,17 @@
   strict portability improvement, and the same binary the published
   container images already run.
 
-## [1.3.3] (2026-07-26)
+## 1.3.3
+
+Released 2026-07-26.
 
 ### Changed
 
 - Fat LTO (`lto = "fat"`) with a single codegen unit was serialising whole-program optimisation across the entire dependency tree. For an I/O-bound service that gains nothing measurable from it, the cost was maximal: CI builds were taking 6+ minutes per target. Switched to thin LTO and raised codegen units to 16.
 
-## [1.3.2] (2026-07-26)
+## 1.3.2
+
+Released 2026-07-26.
 
 ### Changed
 
