@@ -1,0 +1,1 @@
+- **The `darwin-x86_64` release binary.** Releases ship a macOS binary for Apple silicon only (`tfl-darwin-aarch64.tar.gz`). Intel Macs can run the container image or build from source.
