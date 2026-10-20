@@ -22,10 +22,10 @@ An MCP and GraphQL server over the Transport for London Unified API, built as th
 
 Most jobs run only when the change touches their domain, so a skipped job is expected and passes `Checks`; a failed or cancelled one fails it. The `changes` job decides from the diff (against the base on a pull request, against the last main commit whose run passed on a push), and a manual run, a push with no passed commit within reach, a release PR or a diff it cannot compute runs everything. Markdown never counts, and anything under `.github/` counts for every domain.
 
-- `rust`: crates, xtask, `codegen/` (the tests read the spec), the manifests, `Cargo.lock`, `.cargo/`. Runs `Format` and `Linux` (clippy and the tests).
+- `rust`: crates, xtask, `codegen/` (the tests read the spec), the manifests, `Cargo.lock`, `.cargo/`, rustfmt and clippy settings. Runs `Format` and `Linux` (clippy and the tests).
 - `codegen`: the generated client, xtask, `codegen/`, and a `Cargo.lock` change that reaches xtask's dependencies. Runs the drift check.
 - `apple`: the native inputs the Linux jobs cannot vouch for on macOS (manifests, build scripts, `.cargo/`, the toolchain, a `Cargo.lock` change that reaches a workspace member's dependencies), code near a `cfg` for an Apple target, or a release. Runs `macOS` (the tests, plus both darwin release builds on a release PR). The account's macOS runners are few and shared, so a plain source change does not take one.
-- `docker`: `Dockerfile` or a native input on a pull request; on main any `rust` change, since CD ships the binaries. Runs the musl builds and the image.
+- `docker`: `Dockerfile` or a native input of the server (not xtask's) on a pull request; on main any `rust` change, since CD ships the binaries. Runs the musl builds and the image.
 
 `Changelog` always runs. Whether a `Cargo.lock` change reaches a domain is decided by `.github/scripts/lock_inputs.py`; if it fails, the change counts. To add a domain, add its output to `changes` with an allowlist of paths, gate its jobs with a job-level `if:`, and add them to `needs:` of `checks`.
 

@@ -2,7 +2,8 @@
 
 The lockfile is shared by the whole workspace, so a change to it says nothing
 on its own about which jobs it can break. This prints `codegen=true|false`
-and `native=true|false` for the change between two commits:
+`native=true|false` and `server=true|false` for the change between two
+commits:
 
 - codegen: a package xtask depends on, directly or not, was added, removed or
   changed. The generated client is a function of xtask and the spec alone.
@@ -10,6 +11,7 @@ and `native=true|false` for the change between two commits:
   compiles. The lock lists every target's dependencies, so the macOS-only
   crates (the platform TLS verifier's Security.framework bindings, for one)
   are in that closure too.
+- server: the same for tfl-mcp alone, the binary the musl builds ship.
 
     python3 lock_inputs.py BASE HEAD
 """
@@ -57,6 +59,7 @@ def main():
     members = {p["name"] for p in packages(new) if "source" not in p}
     print(f"codegen={str(reaches(old, new, ['xtask'])).lower()}")
     print(f"native={str(reaches(old, new, members)).lower()}")
+    print(f"server={str(reaches(old, new, ['tfl-mcp'])).lower()}")
 
 
 main()

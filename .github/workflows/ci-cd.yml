@@ -2,8 +2,8 @@ name: CI/CD
 
 # Two halves in one run, so the second ships what the first built.
 #
-# CI checks the change and ends in `Checks`, the one status the ruleset
-# requires. Each job runs only for the domains the change touches (see
+# CI checks the change and ends in `Checks`, the one status a ruleset
+# should require. Each job runs only for the domains the change touches (see
 # `changes`); a skipped job passes `Checks`, a failed or cancelled one fails
 # it. Jobs can therefore be added, renamed or skipped without touching branch
 # protection.
@@ -149,16 +149,18 @@ jobs:
             # Cargo.lock counts for the generator, and for the native builds
             # (macOS, musl), only when the change reaches them. Unanswerable,
             # it counts.
-            lock=$(python3 .github/scripts/lock_inputs.py "$base" HEAD) || lock=$'codegen=true\nnative=true'
+            lock=$(python3 .github/scripts/lock_inputs.py "$base" HEAD) || lock=$'codegen=true\nnative=true\nserver=true'
             eval "$(printf '%s\n' "$lock" | sed 's/^/lock_/')"
 
-            # Anything cargo compiles or that decides how. The server's tests
-            # read the spec under codegen/ with include_str!.
-            touches '^crates/|^xtask/|^codegen/|^Cargo\.(toml|lock)$|^\.cargo/|^rust-toolchain|^\.github/' || rust=false
-            # The generated client is a function of the generator, the spec
-            # and the toolchain; a hand-edit under generated/ also shows here.
+            # Anything cargo compiles or that decides how, and the formatter's
+            # and linter's settings. The server's tests read the spec under
+            # codegen/ with include_str!.
+            touches '^crates/|^xtask/|^codegen/|^Cargo\.(toml|lock)$|^\.cargo/|^rust-toolchain|^\.?(rustfmt|clippy)\.toml$|^\.github/' || rust=false
+            # The generated client is a function of the generator, the spec,
+            # the toolchain and rustfmt's settings, since the generator formats
+            # its output; a hand-edit under generated/ also shows here.
             if [ "$lock_codegen" != true ]; then
-              touches '^crates/tfl-api-client/|^xtask/|^codegen/|^Cargo\.toml$|^\.cargo/|^rust-toolchain|^\.github/' || codegen=false
+              touches '^crates/tfl-api-client/|^xtask/|^codegen/|^Cargo\.toml$|^\.cargo/|^rust-toolchain|^\.?rustfmt\.toml$|^\.github/' || codegen=false
             fi
             # The macOS runners are few and shared by every repository. The
             # code has no macOS-only paths, so the Linux jobs cover a source
@@ -178,10 +180,13 @@ jobs:
             fi
             # The image is the static musl binaries copied into it. The Rust
             # jobs already check the code, so a pull request builds them and
-            # the image only when the recipe or a native input changed; main
-            # whenever what they contain did, since CD ships them.
+            # the image only when the recipe or a native input of the server
+            # changed (xtask's are not in it); main whenever what they contain
+            # did, since CD ships them.
             if [ "$EVENT" = "pull_request" ] || [ "$rust" = false ]; then
-              [ "$native" = true ] || touches '^Dockerfile$' || docker=false
+              [ "$lock_server" = true ] \
+                || touches '^Dockerfile$|^Cargo\.toml$|^crates/[^/]+/Cargo\.toml$|^crates/.*build\.rs$|^\.cargo/|^rust-toolchain|^\.github/' \
+                || docker=false
             fi
           fi
           # A release PR runs everything; a release ships the image.
@@ -215,6 +220,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.changes.outputs.release == 'true'
     permissions:
       actions: write
+      contents: read
     steps:
       # Only runs older than this one, and on main only those the workflow's
       # concurrency would also cancel: never one whose commit is titled
@@ -438,7 +444,7 @@ jobs:
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}.tar.gz
-          retention-days: ${{ needs.changes.outputs.release == 'true' && 90 || 7 }}
+          retention-days: ${{ github.event_name != 'pull_request' && needs.changes.outputs.release == 'true' && 90 || 7 }}
 
   # The binaries above in the image, for both architectures. A pull request
   # builds it to prove it builds. Main pushes it under the commit, in parallel
@@ -556,16 +562,33 @@ jobs:
       # from the one the tag holds now (its revision label). Main's head is no
       # guide, since a later push that builds no image moves it without
       # retagging.
+      #
+      # Only a missing tag or label, or a labelled commit GitHub no longer
+      # knows (history rewritten), means "move"; any other failure to read
+      # either fails the step rather than guess.
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          current=$(docker buildx imagetools inspect "$IMAGE:main" --format '{{json .Image}}' 2>/dev/null \
-            | jq -r '[.. | objects | .config.Labels?["org.opencontainers.image.revision"]? // empty][0] // empty' || true)
+          if inspect=$(docker buildx imagetools inspect "$IMAGE:main" --format '{{json .Image}}' 2>&1); then
+            current=$(printf '%s' "$inspect" \
+              | jq -r '[.. | objects | .config.Labels?["org.opencontainers.image.revision"]? // empty][0] // empty')
+          elif printf '%s' "$inspect" | grep -qiE 'not found|manifest unknown'; then
+            current=
+          else
+            echo "::error::cannot read $IMAGE:main: $inspect"
+            exit 1
+          fi
           if [ -n "$current" ] && [ "$current" != "$GITHUB_SHA" ]; then
-            status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$current...$GITHUB_SHA" --jq .status)
-            if [ "$status" != ahead ]; then
-              echo "::notice::main holds $current, which this commit does not descend from ($status); leaving it"
-              exit 0
+            if status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$current...$GITHUB_SHA" --jq .status 2>&1); then
+              if [ "$status" != ahead ]; then
+                echo "::notice::main holds $current, which this commit does not descend from ($status); leaving it"
+                exit 0
+              fi
+            elif printf '%s' "$status" | grep -q 'HTTP 404'; then
+              echo "::notice::main holds $current, which no longer exists; moving it"
+            else
+              echo "::error::cannot compare $current with this commit: $status"
+              exit 1
             fi
           fi
           docker buildx imagetools create -t "$IMAGE:main" "$IMAGE:$GITHUB_SHA"
