@@ -3,9 +3,11 @@
 # arriving per request via the X-Tfl-App-Key header. No key is also fine: TfL
 # serves anonymous callers at 50 requests/minute.
 #
-# No build stage, no package manager: CI builds the static musl binary and
-# this image only copies it in. `docker build .` by hand requires dist/ to be
-# populated first. That is intended: docker builds only ever happen in CI.
+# No build stage, no package manager: CI builds the static musl binaries and
+# this image only copies them in. The build context is dist/, holding
+# <arch>/tfl for each of amd64 and arm64 (the release tarballs, unpacked), so
+# a build by hand needs `docker build -f Dockerfile dist` with those in place.
+# That is intended: docker builds only ever happen in CI.
 
 FROM scratch
 
@@ -25,7 +27,7 @@ ARG TARGETARCH
 COPY --from=gcr.io/distroless/static:latest \
      /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
-COPY dist/tfl-linux-${TARGETARCH}-musl /tfl
+COPY ${TARGETARCH}/tfl /tfl
 
 EXPOSE 8080
 
