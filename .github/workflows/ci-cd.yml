@@ -138,13 +138,15 @@ jobs:
           elif [ "$EVENT" != "workflow_dispatch" ] && files=$(git diff --name-only "$base" HEAD); then
             echo "changes since $(git rev-parse --short "$base"):"
             printf '%s\n' "$files" | sed 's/^/  /'
-            # Cargo.lock counts for the generator and the macOS build only
-            # when the change reaches them. Unanswerable, it counts.
-            lock=$(python3 .github/scripts/lock_inputs.py "$base" HEAD) || lock=$'codegen=true\napple=true'
+            # Cargo.lock counts for the generator, and for the native builds
+            # (macOS, musl), only when the change reaches them. Unanswerable,
+            # it counts.
+            lock=$(python3 .github/scripts/lock_inputs.py "$base" HEAD) || lock=$'codegen=true\nnative=true'
             eval "$(printf '%s\n' "$lock" | sed 's/^/lock_/')"
 
-            # Anything cargo compiles or that decides how.
-            touches '^crates/|^xtask/|^Cargo\.(toml|lock)$|^\.cargo/|^rust-toolchain|^\.github/' || rust=false
+            # Anything cargo compiles or that decides how. The server's tests
+            # read the spec under codegen/ with include_str!.
+            touches '^crates/|^xtask/|^codegen/|^Cargo\.(toml|lock)$|^\.cargo/|^rust-toolchain|^\.github/' || rust=false
             # The generated client is a function of the generator, the spec
             # and the toolchain; a hand-edit under generated/ also shows here.
             if [ "$lock_codegen" != true ]; then
@@ -152,23 +154,26 @@ jobs:
             fi
             # The macOS runners are few and shared by every repository. The
             # code has no macOS-only paths, so the Linux jobs cover a source
-            # change; what they cannot see is a dependency, manifest, build
-            # script or toolchain change (aws-lc-sys is a C build), or code
-            # added next to a cfg for an Apple target.
+            # change; what they cannot see is a native input changing (a
+            # dependency, manifest, build script or the toolchain: aws-lc-sys
+            # is a C build), or code added next to a cfg for an Apple target.
+            native=false
+            if [ "$lock_native" = true ] || touches '(^|/)Cargo\.toml$|(^|/)build\.rs$|^\.cargo/|^rust-toolchain|^\.github/'; then
+              native=true
+            fi
             apple=false
-            if [ "$release" = true ] || [ "$lock_apple" = true ] \
-              || touches '(^|/)Cargo\.toml$|(^|/)build\.rs$|^\.cargo/|^rust-toolchain|^\.github/'; then
+            if [ "$release" = true ] || [ "$native" = true ]; then
               apple=true
             elif git diff -U20 "$base" HEAD -- '*.rs' '*.toml' \
               | grep -E '^[ +-]' | grep -qE 'target_os = "(macos|ios)"|target_vendor = "apple"'; then
               apple=true
             fi
-            # The image is the Linux binaries in a runtime layer. The Rust
+            # The image is the static musl binaries copied into it. The Rust
             # jobs already check the code, so a pull request builds them and
-            # the image only when the recipe changed; main whenever what they
-            # contain did, since CD ships them.
+            # the image only when the recipe or a native input changed; main
+            # whenever what they contain did, since CD ships them.
             if [ "$EVENT" = "pull_request" ] || [ "$rust" = false ]; then
-              touches '^Dockerfile$|^\.github/' || docker=false
+              [ "$native" = true ] || touches '^Dockerfile$' || docker=false
             fi
           fi
           # A release PR runs everything; a release ships the image.
@@ -203,16 +208,21 @@ jobs:
     permissions:
       actions: write
     steps:
+      # Only runs older than this one, and on main only those the workflow's
+      # concurrency would also cancel: never one whose commit is titled
+      # `release: ` or changes the server's Cargo.toml, which may release.
       - env:
           GH_TOKEN: ${{ github.token }}
           SELF: ${{ github.run_id }}
         run: |
           for status in requested queued pending waiting in_progress; do
             gh run list --repo "$GITHUB_REPOSITORY" --workflow ci-cd.yml --status "$status" --limit 100 \
-              --json databaseId,event,headBranch,displayTitle \
-              --jq '.[] | select(.event == "pull_request" or (.event == "push" and .headBranch == "main" and (.displayTitle | startswith("release: ") | not))) | .databaseId'
-          done | sort -u | while read -r id; do
-            [ "$id" = "$SELF" ] && continue
+              --json databaseId,event,headBranch,headSha,displayTitle \
+              --jq ".[] | select(.databaseId < $SELF) | select(.event == \"pull_request\" or (.event == \"push\" and .headBranch == \"main\" and (.displayTitle | startswith(\"release: \") | not))) | \"\\(.databaseId) \\(.event) \\(.headSha)\""
+          done | sort -u | while read -r id event sha; do
+            if [ "$event" = push ] && gh api "repos/$GITHUB_REPOSITORY/commits/$sha" --jq '.files[].filename' | grep -qx crates/tfl-mcp/Cargo.toml; then
+              continue
+            fi
             echo "cancelling run $id"
             gh run cancel "$id" --repo "$GITHUB_REPOSITORY" || true
           done
@@ -223,8 +233,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     timeout-minutes: 10
-    # A newer push cancels a PR's checks, never main's: a release run's
-    # publish jobs need these to finish.
+    # A newer push cancels a PR's checks. On main the group is the run's own,
+    # so only the workflow's concurrency decides, and it never cancels a run
+    # that may release.
     concurrency:
       group: fmt-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
       cancel-in-progress: true
@@ -260,9 +271,9 @@ jobs:
           fi
 
   # Clippy and the tests on one runner, with one target directory and one
-  # cache: they share build scripts and proc-macros, which separate jobs each
-  # compiled. The tests run however clippy went, so one push reports every
-  # failure; neither runs after a failed setup step.
+  # cache, since they share build scripts and proc-macros. The tests run
+  # however clippy went, so one push reports every failure; neither runs
+  # after a failed setup step.
   linux:
     name: Linux
     runs-on: ubuntu-latest
@@ -334,8 +345,10 @@ jobs:
 
   # The tests on macOS, for what the Linux jobs cannot see (see `changes`).
   # The account's macOS runners are few and shared by every repository, so
-  # this is one job, in the dev profile. A release push is not checked again:
-  # its pull request was. The release build belongs to `macos-release`.
+  # this is one job, in the dev profile; a release PR also builds both darwin
+  # targets as the release will, unsigned. A release push is not checked
+  # again: its pull request was. The release build belongs to
+  # `macos-release`.
   apple:
     name: macOS
     runs-on: macos-latest
@@ -350,12 +363,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - id: cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: apple
           cache-on-failure: true
       - run: cargo test --workspace --locked
+      - if: ${{ !cancelled() && steps.cache.outcome == 'success' && needs.changes.outputs.release == 'true' }}
+        run: |
+          cargo build --release --locked -p tfl-mcp --target x86_64-apple-darwin
+          cargo build --release --locked -p tfl-mcp --target aarch64-apple-darwin
 
   # The Linux binaries, in release, once: the image is built from them and a
   # release attaches them. Static musl builds on the runners, each on its own
