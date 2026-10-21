@@ -20,7 +20,7 @@ tokio = { workspace = true }
 url.workspace = true
 percent-encoding.workspace = true
 serde_repr = "0.1"
-serde_with = { version = "3.8", default-features = false, features = [
+serde_with = { version = "3.24", default-features = false, features = [
   "base64",
   "std",
   "macros",
