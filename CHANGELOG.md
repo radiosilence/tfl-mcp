@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.7
+
+### Security
+
+- **Dependencies updated for RustSec advisories.** Fixes h2 (RUSTSEC-2026-0258), quinn-proto (RUSTSEC-2026-0338 to 0342), rustls (RUSTSEC-2026-0285/0346/0348/0349), rustls-webpki (RUSTSEC-2026-0382) and webpki-root-certs (RUSTSEC-2026-0383). Includes rmcp 1 → 3.
+
+### Internal
+
+- **Release script recuts a stale branch.** `scripts/release.sh` deletes a release branch whose PR was closed or merged, locally and on origin, and cuts it again from origin/main; a branch with an open PR still stops it.
+- **One CI/CD pipeline gated by `Checks`.** `ci.yml` becomes `ci-cd.yml`: jobs run only for the domains a change touches, `Checks` is the one required status, and CD runs after it on main. The Linux binaries are built once, and the image copies them in and the release attaches them; the image is pushed under its commit while the checks run and retagged afterwards, and macOS takes one runner, only when the Linux jobs cannot vouch for a change (native inputs such as dependencies, manifests, build scripts, `.cargo/` or the toolchain; code near an Apple `cfg`; workflow changes) and for releases.
+- **A release run is no longer cancelled while it waits to move the image tag.** A concurrency group holds one pending job and cancels it when another queues, so release runs now wait in a group of their own.
+
 ## 1.3.6
 
 ### Internal
