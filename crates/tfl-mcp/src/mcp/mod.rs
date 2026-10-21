@@ -19,7 +19,8 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, Implementation, ProtocolVersion, ServerCapabilities,
+        ServerInfo,
     },
     schemars,
     service::RequestContext,
@@ -120,11 +121,13 @@ impl TflMcp {
     }
 
     fn text_result(text: impl Into<String>) -> ToolResult {
-        Ok(CallToolResult::success(vec![Content::text(text.into())]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            text.into(),
+        )]))
     }
 
     fn error_result(msg: impl Into<String>) -> ToolResult {
-        Ok(CallToolResult::error(vec![Content::text(msg.into())]))
+        Ok(CallToolResult::error(vec![ContentBlock::text(msg.into())]))
     }
 }
 
