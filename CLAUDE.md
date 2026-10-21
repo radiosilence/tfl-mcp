@@ -14,7 +14,22 @@ An MCP and GraphQL server over the Transport for London Unified API, built as th
 
 ## Releasing
 
-`just release patch|minor|major` (or an exact `X.Y.Z`) branches from main, bumps `crates/tfl-mcp/Cargo.toml` and `Cargo.lock`, turns the unreleased fragments into the version and opens the release PR. Merging it is the release: CI pushes the `vX.Y.Z`, `vX.Y`, `vX` and `latest` image tags, then creates the GitHub release with the binaries and the changelog section as notes. The image goes first because jaritanet pins `vX.Y.Z` as soon as the release exists. A push releases only when it changes the version; `gh workflow run ci.yml` on main retries a release that failed part way.
+`just release patch|minor|major` (or an exact `X.Y.Z`) branches from main, bumps `crates/tfl-mcp/Cargo.toml` and `Cargo.lock`, turns the unreleased fragments into the version and opens the release PR. Merging it is the release: CD tags the image already built for that commit `vX.Y.Z`, `vX.Y`, `vX` and `latest`, then creates the GitHub release with the binaries and the changelog section as notes. The image goes first because jaritanet pins `vX.Y.Z` as soon as the release exists. A push releases only when it changes the version and that version is not yet released; `gh workflow run ci-cd.yml` on main retries a release that failed part way.
+
+## CI/CD
+
+`.github/workflows/ci-cd.yml` is one pipeline. CI ends in `Checks`, the only status a ruleset should require; CD runs after it on main, in the same run, and ships what CI built.
+
+Most jobs run only when the change touches their domain, so a skipped job is expected and passes `Checks`; a failed or cancelled one fails it. The `changes` job decides from the diff (against the base on a pull request, against the last main commit whose run passed on a push), and a manual run, a push with no passed commit within reach, a release PR or a diff it cannot compute runs everything. Markdown never counts, and anything under `.github/` counts for every domain.
+
+- `rust`: crates, xtask, `codegen/` (the tests read the spec), the manifests, `Cargo.lock`, `.cargo/`, rustfmt and clippy settings. Runs `Format` and `Linux` (clippy and the tests).
+- `codegen`: the generated client, xtask, `codegen/`, and a `Cargo.lock` change that reaches xtask's dependencies. Runs the drift check.
+- `apple`: the native inputs the Linux jobs cannot vouch for on macOS (manifests, build scripts, `.cargo/`, the toolchain, a `Cargo.lock` change that reaches a workspace member's dependencies), code near a `cfg` for an Apple target, or a release. Runs `macOS` (the tests, plus both darwin release builds on a release PR). The account's macOS runners are few and shared, so a plain source change does not take one.
+- `docker`: `Dockerfile` or a native input of the server (not xtask's) on a pull request; on main any `rust` change, since CD ships the binaries. Runs the musl builds and the image.
+
+`Changelog` always runs. Whether a `Cargo.lock` change reaches a domain is decided by `.github/scripts/lock_inputs.py`; if it fails, the change counts. To add a domain, add its output to `changes` with an allowlist of paths, gate its jobs with a job-level `if:`, and add them to `needs:` of `checks`.
+
+Main pushes the image as `:<sha>` while the checks run; CD tags it `sha-<short>` once they pass and moves `main` onto it when the commit descends from the one `main` holds (its `org.opencontainers.image.revision` label), so a release run finishing late never moves `main` backwards; a release adds the version tags. The release binaries are built once: the Linux tarballs are what the image holds and what the release attaches, and the macOS release build starts alongside the checks.
 
 ## Check
 
