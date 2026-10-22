@@ -494,13 +494,23 @@ jobs:
           tags: ${{ env.IMAGE }}:${{ github.sha }}
           labels: org.opencontainers.image.revision=${{ github.sha }}
 
+  # Always runs: the workflows are checked wherever the change is, and the
+  # image bundles shellcheck for the `run:` scripts.
+  actionlint:
+    name: Actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+
   # The one status the ruleset requires. Skipped jobs are domains the change
   # does not touch and pass; anything failed or cancelled fails it.
   checks:
     name: Checks
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [changes, fmt, changelog, linux, codegen, apple, linux-build, container]
+    needs: [changes, actionlint, fmt, changelog, linux, codegen, apple, linux-build, container]
     if: always()
     steps:
       - env:
