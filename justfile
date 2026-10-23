@@ -3,6 +3,7 @@
 # What CI checks: format, lint with warnings as errors, tests, and that the
 # generated client matches the committed spec.
 check:
+    actionlint
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace --locked

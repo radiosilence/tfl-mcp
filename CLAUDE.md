@@ -34,6 +34,6 @@ Main pushes the image as `:<sha>` while the checks run; CD tags it `sha-<short>`
 ## Check
 
 ```sh
-just check   # fmt --check, clippy -D warnings, tests (live TfL tests stay ignored), codegen drift
+just check   # fmt --check, clippy -D warnings, tests (live TfL tests stay ignored), codegen drift, actionlint
 just fmt
 ```
