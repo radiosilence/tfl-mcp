@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.8
+
+### Security
+
+- Update tokio and other packages for security
+
+### Internal
+
+- **Workflows are linted.** CI runs actionlint, with shellcheck, over `.github/workflows`, and `just check` runs it locally.
+
 ## 1.3.7
 
 ### Security
