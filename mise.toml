@@ -1,5 +1,5 @@
 [tools]
-rust = { version = "1", components = "rustfmt,clippy" }
+rust = { version = "latest", components = "rustfmt,clippy" }
 just = "latest"
 "aqua:rhysd/actionlint" = "1.7.12"
 "aqua:koalaman/shellcheck" = "0.11.0"
